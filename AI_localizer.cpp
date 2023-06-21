@@ -4,6 +4,8 @@
 #include <string>
 #include <cassert>
 #include <itkImage.h>
+#include <itkImageSeriesReader.h>
+#include <itkGDCMImageIO.h>
 #include <itkImageFileReader.h>
 #include <itkRescaleIntensityImageFilter.h>
 #include <itkResampleImageFilter.h>
@@ -31,6 +33,10 @@
 #include <itkImageSeriesWriter.h>
 #include <vtkNIFTIImageWriter.h>
 #include <vtkInformation.h>
+#include <vtkMath.h>
+#include <vtkTransform.h>
+
+#include <cstdlib>
 
 #define orgImgX 320
 #define orgImgY 320
@@ -59,7 +65,7 @@ struct mprOutStruct {
 	vtkSmartPointer<vtkImageData> resliceAxial;
 	vtkSmartPointer<vtkImageData> resliceSagittal;
 	vtkSmartPointer<vtkImageData> resliceCoronal;
-	double tran_angle[9];
+	double tran_angle[3];
 	double tran_origin[3];
 };
 
@@ -88,7 +94,7 @@ void NormalizeVector(array<float, 3>& vec)
 	vec[2] /= norm;
 }
 
-// ¼ÆËãÏòÁ¿²æ³Ë
+// è®¡ç®—å‘é‡å‰ä¹˜
 array<float, 3> cal_norm_vec(array<float, 3> v1, array<float, 3> v2) {
 	array<float, 3> norm_vec;
 	norm_vec[0] = v1[1] * v2[2] - v1[2] * v2[1];
@@ -98,7 +104,7 @@ array<float, 3> cal_norm_vec(array<float, 3> v1, array<float, 3> v2) {
 	return norm_vec;
 }
 
-array<float, 3> ImageToPhysicalPoint(const array<float, 3>& imagePoint, const array<float, 3>& origin, const array<float, 3>& spacing)
+array<float, 3> ImageToPhysicalPoint(const array<int, 3>& imagePoint, const array<float, 3>& origin, const array<float, 3>& spacing)
 {
 	array<float, 3> physicalPoint;
 	for (int i = 0; i < 3; ++i) {
@@ -107,24 +113,18 @@ array<float, 3> ImageToPhysicalPoint(const array<float, 3>& imagePoint, const ar
 	return physicalPoint;
 }
 
-// Ïß³Ìº¯Êı£¬¼ÆËãÃ¿¸öÍ¨µÀµÄ×î´óÖµË÷Òı
-void calculateMaxIndex(const itk::Image<float, 3>::Pointer& channelImage, array<float, 3>& maxIndex)
+// çº¿ç¨‹å‡½æ•°ï¼Œè®¡ç®—æ¯ä¸ªé€šé“çš„æœ€å¤§å€¼ç´¢å¼•
+void calculateMaxIndex(const itk::Image<float, 3>::Pointer& channelImage, array<int, 3>& maxIndex)
 {
-	using ImageSizeType = ImageType3F::SizeType;
 	using ImageIndexType = ImageType3F::IndexType;
-
 	float maxValue = numeric_limits<float>::min();
 
-	float scale_x = 1.0 * orgImgX / imgX;
-	float scale_y = 1.0 * orgImgY / imgY;
-	float scale_z = 1.0 * orgImgZ / imgZ;
-
-	// ±éÀúÍ¼ÏñÏñËØ£¬ÕÒµ½×î´óÖµË÷Òı
-	for (int z = 0; z < imgZ; ++z)
+	// éå†å›¾åƒåƒç´ ï¼Œæ‰¾åˆ°æœ€å¤§å€¼ç´¢å¼•
+	for (int z = 0; z < orgImgZ; ++z)
 	{
-		for (int y = 0; y < imgY; ++y)
+		for (int y = 0; y < orgImgY; ++y)
 		{
-			for (int x = 0; x < imgX; ++x)
+			for (int x = 0; x < orgImgX; ++x)
 			{
 				ImageIndexType currentIndex;
 				currentIndex[0] = x;
@@ -135,26 +135,56 @@ void calculateMaxIndex(const itk::Image<float, 3>::Pointer& channelImage, array<
 				if (pixelValue > maxValue)
 				{
 					maxValue = pixelValue;
-					maxIndex = { x*scale_x, y*scale_y, z*scale_z };
+					maxIndex = { x, y, z };
 				}
 			}
 		}
 	}
 }
 
-/************************ºó´¦Àí»ñµÃ¹Ø¼üµã×ø±ê*********************************/
-vector<array<float, 3>> processOutputBuffer(const float* output_buffer)
+ImageType3F::Pointer resizeImg(ImageType3F::Pointer oriImg, ImageType3F::SizeType targetSize)
+{
+	
+	typedef itk::ResampleImageFilter<ImageType3F, ImageType3F> ResampleFilterType;
+	ResampleFilterType::Pointer resampleFilter = ResampleFilterType::New();
+	resampleFilter->SetInput(oriImg);
+	resampleFilter->SetSize(targetSize);
+	// è®¡ç®—resizeåçš„spacing
+	ImageType3F::SizeType origintSize = oriImg->GetLargestPossibleRegion().GetSize();
+	ImageType3F::SpacingType targetSpacing;
+	for (int i = 0; i < 3; ++i) {
+		targetSpacing[i] = oriImg->GetSpacing()[i] * origintSize[i] / targetSize[i];
+	}
+	resampleFilter->SetOutputSpacing(targetSpacing);
+
+	// è®¾ç½®è¾“å‡ºåŸç‚¹ä¸è¾“å…¥ä¸€è‡´
+	resampleFilter->SetOutputOrigin(oriImg->GetOrigin());
+	resampleFilter->SetOutputDirection(oriImg->GetDirection());
+
+	// ä½¿ç”¨çº¿æ€§æ’å€¼
+	typedef itk::LinearInterpolateImageFunction<ImageType3F, double> InterpolatorType;
+	InterpolatorType::Pointer interpolator = InterpolatorType::New();
+	resampleFilter->SetInterpolator(interpolator);
+
+	// æ›´æ–°è¾“å‡ºå›¾åƒ
+	resampleFilter->Update();
+
+	return resampleFilter->GetOutput();
+}
+
+/************************åå¤„ç†è·å¾—å…³é”®ç‚¹åæ ‡*********************************/
+vector<array<int, 3>> processOutputBuffer(const float* output_buffer)
 {
 	using ResampleFilterType = itk::ResampleImageFilter<ImageType3F, ImageType3F>;
 	using InterpolatorType = itk::LinearInterpolateImageFunction<ImageType3F, double>;
 
-	// ´´½¨Ïß³ÌÁĞ±íºÍ×î´óÖµË÷Òı½á¹ûÊı×é
+	// åˆ›å»ºçº¿ç¨‹åˆ—è¡¨å’Œæœ€å¤§å€¼ç´¢å¼•ç»“æœæ•°ç»„
 	vector<thread> threads;
-	vector<array<float, 3>> maxIndices(nPoint);
+	vector<array<int, 3>> maxIndices(nPoint);
 
 	for (int channel = 0; channel < nPoint; ++channel)
 	{
-		// ´´½¨Ã¿¸öÍ¨µÀµÄÍ¼Ïñ
+		// åˆ›å»ºæ¯ä¸ªé€šé“çš„å›¾åƒ
 		ImageType3F::Pointer channelImage = ImageType3F::New();
 		ImageType3F::RegionType region;
 		ImageType3F::IndexType start;
@@ -168,16 +198,23 @@ vector<array<float, 3>> processOutputBuffer(const float* output_buffer)
 		channelImage->SetRegions(region);
 		channelImage->Allocate();
 
-		// ¸´ÖÆÊä³ö»º³åÇøµÄÊı¾İµ½Í¨µÀÍ¼Ïñ
+		// å¤åˆ¶è¾“å‡ºç¼“å†²åŒºçš„æ•°æ®åˆ°é€šé“å›¾åƒ
 		float* imageBuffer = channelImage->GetBufferPointer();
 		const float* channelBuffer = output_buffer + channel * imgX * imgY * imgZ;
 		memcpy(imageBuffer, channelBuffer, imgX * imgY * imgZ * sizeof(float));
 
-		// Æô¶¯Ïß³Ì£¬Çó×î´óÖµË÷Òı
-		threads.emplace_back(calculateMaxIndex, channelImage, ref(maxIndices[channel]));
+		// è°ƒæ•´å›¾åƒå¤§å°
+		ImageType3F::SizeType targetSize;
+		targetSize[0] = orgImgX;
+		targetSize[1] = orgImgY;
+		targetSize[2] = orgImgZ;
+		ImageType3F::Pointer resampledImg = resizeImg(channelImage, targetSize);
+
+		// å¯åŠ¨çº¿ç¨‹ï¼Œæ±‚æœ€å¤§å€¼ç´¢å¼•
+		threads.emplace_back(calculateMaxIndex, resampledImg, ref(maxIndices[channel]));
 	}
 
-	// µÈ´ıËùÓĞÏß³ÌÍê³É
+	// ç­‰å¾…æ‰€æœ‰çº¿ç¨‹å®Œæˆ
 	for (auto& thread : threads)
 	{
 		thread.join();
@@ -188,10 +225,10 @@ vector<array<float, 3>> processOutputBuffer(const float* output_buffer)
 
 void SaveAsNifti(const vtkSmartPointer<vtkImageData>& imageData, const string& outputPath)
 {
-	// ×ª»»VTKÍ¼ÏñÎªITKÍ¼Ïñ
+	// è½¬æ¢VTKå›¾åƒä¸ºITKå›¾åƒ
 	ImageType2U::Pointer itkImage = ImageType2U::New();
 
-	// ÉèÖÃITKÍ¼ÏñµÄ´óĞ¡ºÍÏñËØÊı¾İ
+	// è®¾ç½®ITKå›¾åƒçš„å¤§å°å’Œåƒç´ æ•°æ®
 	ImageType2U::SizeType size;
 	size[0] = imageData->GetDimensions()[0];
 	size[1] = imageData->GetDimensions()[1];
@@ -207,21 +244,21 @@ void SaveAsNifti(const vtkSmartPointer<vtkImageData>& imageData, const string& o
 		}
 	}
 
-	// ´´½¨NIfTIÍ¼ÏñIO¶ÔÏó
+	// åˆ›å»ºNIfTIå›¾åƒIOå¯¹è±¡
 	using ImageIOType = itk::NiftiImageIO;
 	ImageIOType::Pointer niftiIO = ImageIOType::New();
 
-	// ´´½¨NIfTIÍ¼ÏñĞ´ÈëÆ÷
+	// åˆ›å»ºNIfTIå›¾åƒå†™å…¥å™¨
 	using WriterType = itk::ImageFileWriter<ImageType2U>;
 	WriterType::Pointer writer = WriterType::New();
 
-	// ÉèÖÃÊä³öÂ·¾¶
+	// è®¾ç½®è¾“å‡ºè·¯å¾„
 	writer->SetFileName(outputPath);
 
-	// ÉèÖÃÍ¼ÏñIO¶ÔÏó
+	// è®¾ç½®å›¾åƒIOå¯¹è±¡
 	writer->SetImageIO(niftiIO);
 
-	// ÉèÖÃÍ¼ÏñÔªÊı¾İ
+	// è®¾ç½®å›¾åƒå…ƒæ•°æ®
 	itk::MetaDataDictionary& metaData = writer->GetMetaDataDictionary();
 	string patientName = "John Doe";
 	string patientID = "12345";
@@ -229,7 +266,7 @@ void SaveAsNifti(const vtkSmartPointer<vtkImageData>& imageData, const string& o
 	string seriesDescription = "Sagittal Plane";
 	string sliceThickness = "2.0";
 
-	// ´æ´¢ÔªĞÅÏ¢µ½DICOM±êÇ©
+	// å­˜å‚¨å…ƒä¿¡æ¯åˆ°DICOMæ ‡ç­¾
 	itk::EncapsulateMetaData<string>(metaData, "0010|0010", patientName);
 	itk::EncapsulateMetaData<string>(metaData, "0010|0020", patientID);
 	itk::EncapsulateMetaData<string>(metaData, "0008|1030", studyDescription);
@@ -241,7 +278,7 @@ void SaveAsNifti(const vtkSmartPointer<vtkImageData>& imageData, const string& o
 	double spacingX = imageData->GetSpacing()[0];
 	double spacingY = imageData->GetSpacing()[1];
 
-	// ÉèÖÃÔ­µãºÍ¼ä¾à
+	// è®¾ç½®åŸç‚¹å’Œé—´è·
 	ImageType2U::PointType origin;
 	origin[0] = originX;
 	origin[1] = originY;
@@ -254,29 +291,55 @@ void SaveAsNifti(const vtkSmartPointer<vtkImageData>& imageData, const string& o
 
 	itkImage->SetSpacing(spacing);
 
-	// Ö´ĞĞĞ´Èë²Ù×÷
+	// æ‰§è¡Œå†™å…¥æ“ä½œ
 	writer->SetInput(itkImage);
 	writer->Update();
 }
 
-/************************Í¼Ïñ¼ÓÔØ*********************************/
-ImageType3F::Pointer dataLoad(const string& dcm_dir)
+/***********************dcmå›¾åƒåŠ è½½*********************************/
+ImageType3F::Pointer dcmDataLoad(const string& dcmPath)
+{
+	size_t lastSlash = dcmPath.find_last_of("/\\");
+	string pid = dcmPath.substr(lastSlash + 1);
+
+	using ReaderType = itk::ImageSeriesReader<ImageType3F>;
+	using NamesGeneratorType = itk::NumericSeriesFileNames;
+
+	ReaderType::Pointer reader = ReaderType::New();
+	NamesGeneratorType::Pointer namesGenerator = NamesGeneratorType::New();
+
+	namesGenerator->SetStartIndex(0);
+	namesGenerator->SetEndIndex(119);
+	namesGenerator->SetIncrementIndex(1);
+	namesGenerator->SetSeriesFormat(dcmPath + "/" + pid + "%04d.dcm");
+
+	const std::vector<std::string>& fileNames = namesGenerator->GetFileNames();
+	reader->SetFileNames(fileNames);
+
+	itk::GDCMImageIO::Pointer dicomIO = itk::GDCMImageIO::New();
+	reader->SetImageIO(dicomIO);
+	reader->Update();
+	return reader->GetOutput();
+}
+
+/************************niiå›¾åƒåŠ è½½*********************************/
+ImageType3F::Pointer niiDataLoad(const string& dcm_dir)
 {
 	itk::NiftiImageIOFactory::RegisterOneFactory();
 
-	// ´´½¨Í¼ÏñÎÄ¼ş¶ÁÈ¡Æ÷
+	// åˆ›å»ºå›¾åƒæ–‡ä»¶è¯»å–å™¨
 	ReaderType::Pointer reader = ReaderType::New();
 
-	// ÉèÖÃÒª¶ÁÈ¡µÄÎÄ¼şÃû 
+	// è®¾ç½®è¦è¯»å–çš„æ–‡ä»¶å 
 	reader->SetFileName(dcm_dir);
 	reader->Update();
 	return reader->GetOutput();
 }
 
-/************************Í¼ÏñÔ¤´¦Àí*********************************/
+/************************å›¾åƒé¢„å¤„ç†*********************************/
 ImageType3F::Pointer dataPreprocess(ImageType3F::Pointer Image)
 {
-	// Í¼Ïñ¹éÒ»»¯
+	// å›¾åƒå½’ä¸€åŒ–
 	typedef itk::RescaleIntensityImageFilter<ImageType3F, ImageType3F> RescalerType;
 	RescalerType::Pointer rescaler = RescalerType::New();
 	rescaler->SetInput(Image);
@@ -289,48 +352,24 @@ ImageType3F::Pointer dataPreprocess(ImageType3F::Pointer Image)
 	assert(origintSize[1] == orgImgY);
 	assert(origintSize[2] == orgImgZ);
 
-	// µ÷ÕûÍ¼Ïñ´óĞ¡
-	typedef itk::ResampleImageFilter<ImageType3F, ImageType3F> ResampleFilterType;
-	ResampleFilterType::Pointer resampleFilter = ResampleFilterType::New();
-	resampleFilter->SetInput(rescaler->GetOutput());
-
-	// ¶¨ÒåÄ¿±ê´óĞ¡
+	// å®šä¹‰ç›®æ ‡å¤§å°
 	ImageType3F::SizeType targetSize;
 	targetSize[0] = imgX;
 	targetSize[1] = imgY;
 	targetSize[2] = imgZ;
-	resampleFilter->SetSize(targetSize);
 
-	// ¼ÆËãresizeºóµÄspacing
-	ImageType3F::SpacingType targetSpacing;
-	for (int i = 0; i < 3; ++i) {
-		targetSpacing[i] = rescaler->GetOutput()->GetSpacing()[i] * origintSize[i] / targetSize[i];
-	}
-	resampleFilter->SetOutputSpacing(targetSpacing);
-
-	// ÉèÖÃÊä³öÔ­µãÓëÊäÈëÒ»ÖÂ
-	resampleFilter->SetOutputOrigin(rescaler->GetOutput()->GetOrigin());
-	resampleFilter->SetOutputDirection(rescaler->GetOutput()->GetDirection());
-
-	// Ê¹ÓÃÏßĞÔ²åÖµ
-	typedef itk::LinearInterpolateImageFunction<ImageType3F, double> InterpolatorType;
-	InterpolatorType::Pointer interpolator = InterpolatorType::New();
-	resampleFilter->SetInterpolator(interpolator);
-
-	// ¸üĞÂÊä³öÍ¼Ïñ
-	resampleFilter->Update();
-
-	return resampleFilter->GetOutput();
+	ImageType3F::Pointer resampledImg = resizeImg(rescaler->GetOutput(), targetSize);
+	return resampledImg;
 }
 
-/************************¹¹½¨TensorRT Engine*********************************/
+/************************æ„å»ºTensorRT Engine*********************************/
 ICudaEngine* buildEngine(const string& engine_model_path, const string& onnx_model_path, ILogger& logger)
 {
 	ICudaEngine *engine;
-	// ÅĞ¶ÏÊÇ·ñ´æÔÚĞòÁĞ»¯ÎÄ¼ş
+	// åˆ¤æ–­æ˜¯å¦å­˜åœ¨åºåˆ—åŒ–æ–‡ä»¶
 	ifstream engineFile(engine_model_path, ios_base::in | ios::binary);
 	if (!engineFile) {
-		// Èç¹û²»´æÔÚ.engineÎÄ¼şÔòÆô¶¯ĞòÁĞ»¯¹ı³Ì£¬Éú³É.engineÎÄ¼ş£¬²¢·´ĞòÁĞ»¯´´½¨engine
+		// å¦‚æœä¸å­˜åœ¨.engineæ–‡ä»¶åˆ™å¯åŠ¨åºåˆ—åŒ–è¿‡ç¨‹ï¼Œç”Ÿæˆ.engineæ–‡ä»¶ï¼Œå¹¶ååºåˆ—åŒ–åˆ›å»ºengine
 		IBuilder *builder = createInferBuilder(logger);
 		const uint32_t explicit_batch = 1U << static_cast<uint32_t>(NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
 		INetworkDefinition *network = builder->createNetworkV2(explicit_batch);
@@ -349,7 +388,7 @@ ICudaEngine* buildEngine(const string& engine_model_path, const string& onnx_mod
 
 		IHostMemory *serialized_model = builder->buildSerializedNetwork(*network, *config);
 
-		// ½«Ä£ĞÍĞòÁĞ»¯µ½engineÎÄ¼şÖĞ
+		// å°†æ¨¡å‹åºåˆ—åŒ–åˆ°engineæ–‡ä»¶ä¸­
 		stringstream engine_file_stream;
 		engine_file_stream.seekg(0, engine_file_stream.beg);
 		engine_file_stream.write(static_cast<const char *>(serialized_model->data()), serialized_model->size());
@@ -369,7 +408,7 @@ ICudaEngine* buildEngine(const string& engine_model_path, const string& onnx_mod
 		delete runtime;
 	}
 	else {
-		// Èç¹ûÓĞ.engineÎÄ¼ş£¬ÔòÖ±½Ó¶ÁÈ¡ÎÄ¼ş£¬·´ĞòÁĞ»¯Éú³Éengine
+		// å¦‚æœæœ‰.engineæ–‡ä»¶ï¼Œåˆ™ç›´æ¥è¯»å–æ–‡ä»¶ï¼Œååºåˆ—åŒ–ç”Ÿæˆengine
 		engineFile.seekg(0, ios::end);
 		size_t engineSize = engineFile.tellg();
 		engineFile.seekg(0, ios::beg);
@@ -387,12 +426,12 @@ ICudaEngine* buildEngine(const string& engine_model_path, const string& onnx_mod
 	return engine;
 }
 
-/************************engineÔ¤²â*********************************/
+/************************engineé¢„æµ‹*********************************/
 float* enginePredict(ICudaEngine *engine, ImageType3F::Pointer imageData)
 {
 	float* imageData_buffer = imageData->GetBufferPointer();
-	// »ñÈ¡Ä£ĞÍÊäÈë³ß´ç²¢·ÖÅäGPUÄÚ´æ
-	void *buffers[2];
+	// è·å–æ¨¡å‹è¾“å…¥å°ºå¯¸å¹¶åˆ†é…GPUå†…å­˜
+	void *buffers[3];
 	Dims input_dim = engine->getBindingDimensions(0);
 	int input_size = 1;
 	for (int j = 0; j < input_dim.nbDims; ++j) {
@@ -400,33 +439,35 @@ float* enginePredict(ICudaEngine *engine, ImageType3F::Pointer imageData)
 	}
 	cudaMalloc(&buffers[0], input_size * sizeof(float));
 
-	// »ñÈ¡Ä£ĞÍÊä³ö³ß´ç²¢·ÖÅäGPUÄÚ´æ
+	// è·å–æ¨¡å‹è¾“å‡ºå°ºå¯¸å¹¶åˆ†é…GPUå†…å­˜
 	Dims output_dim = engine->getBindingDimensions(1);
 	int output_size = 1;
 	for (int j = 0; j < output_dim.nbDims; ++j) {
 		output_size *= output_dim.d[j];
 	}
 	cudaMalloc(&buffers[1], output_size * sizeof(float));
+	cudaMalloc(&buffers[2], output_size * sizeof(float));
 
-	// ¸øÄ£ĞÍÊä³öÊı¾İ·ÖÅäÏàÓ¦µÄCPUÄÚ´æ
+	// ç»™æ¨¡å‹è¾“å‡ºæ•°æ®åˆ†é…ç›¸åº”çš„CPUå†…å­˜
 	float *output_buffer = new float[output_size]();
 
-	// ´´½¨cudaÁ÷
+	// åˆ›å»ºcudaæµ
 	cudaStream_t stream;
 	cudaStreamCreate(&stream);
 
-	// ¿½±´ÊäÈëÊı¾İ
+	// æ‹·è´è¾“å…¥æ•°æ®
 	cudaMemcpyAsync(buffers[0], imageData_buffer, input_size * sizeof(float), cudaMemcpyHostToDevice, stream);
 
-	// Ö´ĞĞÍÆÀí
+	// æ‰§è¡Œæ¨ç†
 	IExecutionContext *context = engine->createExecutionContext();
 	context->enqueueV2(buffers, stream, nullptr);
-	// ¿½±´Êä³öÊı¾İ
-	cudaMemcpyAsync(output_buffer, buffers[1], output_size * sizeof(float), cudaMemcpyDeviceToHost, stream);
+	// æ‹·è´è¾“å‡ºæ•°æ®
+	cudaMemcpyAsync(output_buffer, buffers[2], output_size * sizeof(float), cudaMemcpyDeviceToHost, stream);
 	cudaStreamSynchronize(stream);
 
 	cudaFree(buffers[0]);
 	cudaFree(buffers[1]);
+	cudaFree(buffers[2]);
 	cudaStreamDestroy(stream);
 	context->destroy();
 
@@ -434,11 +475,11 @@ float* enginePredict(ICudaEngine *engine, ImageType3F::Pointer imageData)
 }
 
 
-/************************MPRÊä³öÇĞÃæ*********************************/
-//mode: 1:ºá¶ÏÃæ 2:Ê¸×´Ãæ  3:¹Ú×´Ãæ
-void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_points, int mode, mprOutStruct& localize_result)
+/************************MPRè¾“å‡ºåˆ‡é¢*********************************/
+//mode: 1:æ¨ªæ–­é¢ 2:çŸ¢çŠ¶é¢  3:å† çŠ¶é¢
+void mprProcess(ImageType3F::Pointer itk_image, vector<array<int, 3>> out_points, int mode, mprOutStruct& localize_result)
 {
-	// itk×ª»¯ÎªvtkÊı¾İ
+	// itkè½¬åŒ–ä¸ºvtkæ•°æ®
 	using ITKToVTKFilterType = itk::ImageToVTKImageFilter<ImageType3F>;
 	ITKToVTKFilterType::Pointer itkToVtkFilter = ITKToVTKFilterType::New();
 	itkToVtkFilter->SetInput(itk_image);
@@ -478,26 +519,26 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 	array<float, 3> normal_axial;
 	array<float, 3> normal_coronal;
 
-	// ¼ÆËãÊ¸×´ÃæµÄ·¨ÏßÏòÁ¿
+	// è®¡ç®—çŸ¢çŠ¶é¢çš„æ³•çº¿å‘é‡
 	SubtractVectors(point5, point1, v1_sagittal);
 	NormalizeVector(v1_sagittal);
 	SubtractVectors(point3, point1, v2_sagittal);
 	NormalizeVector(v2_sagittal);
 	normal_sagittal = cal_norm_vec(v1_sagittal, v2_sagittal);
 
-	// ¼ÆËãºá¶ÏÃæµÄ·¨ÏßÏòÁ¿
+	// è®¡ç®—æ¨ªæ–­é¢çš„æ³•çº¿å‘é‡
 	SubtractVectors(point5, point4, v1_axial);
 	NormalizeVector(v1_axial);
 	v2_axial = normal_sagittal;
 	normal_axial = cal_norm_vec(v1_axial, v2_axial);
 
-	// ¼ÆËã¹Ú×´ÃæµÄ·¨ÏßÏòÁ¿
+	// è®¡ç®—å† çŠ¶é¢çš„æ³•çº¿å‘é‡
 	SubtractVectors(point2, point3, v1_coronal);
 	NormalizeVector(v1_coronal);
 	v2_coronal = normal_sagittal;
 	normal_coronal = cal_norm_vec(v1_coronal, v2_coronal);
 
-	// Èç¹ûÊÇ¶¨Î»ºá¶ÏÃæ£¬ÔòÒÔºá¶ÏÃæÎª±ê×¼£¬ÆäËüÁ½¸öÃæÓëÖ®´¹Ö±
+	// å¦‚æœæ˜¯å®šä½æ¨ªæ–­é¢ï¼Œåˆ™ä»¥æ¨ªæ–­é¢ä¸ºæ ‡å‡†ï¼Œå…¶å®ƒä¸¤ä¸ªé¢ä¸ä¹‹å‚ç›´
 	if (mode == 1)
 	{
 		array<float, 3> axis1_axial = v1_axial;
@@ -505,12 +546,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		array<float, 3> axis3_axial = v2_axial;
 		double origin[3] = { point5[0], point5[1], point5[2] };
 
-		// MPRµÃµ½ºá¶ÏÃæ
+		// MPRå¾—åˆ°æ¨ªæ–­é¢
 		vtkSmartPointer<vtkImageReslice> resliceAxialAtAxial = vtkSmartPointer<vtkImageReslice>::New();
 		resliceAxialAtAxial->SetInputData(vtkImage);
 		resliceAxialAtAxial->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double axialDirectionCosines[9] = { axis3_axial[0], axis3_axial[1], axis3_axial[2],
 											-axis1_axial[0], -axis1_axial[1], -axis1_axial[2],
 											axis2_axial[0], axis2_axial[1], axis2_axial[2] };
@@ -520,12 +561,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		resliceAxialAtAxial->SetInterpolationModeToLinear();
 		resliceAxialAtAxial->Update();
 
-		// MPRµÃµ½Ê¸×´Ãæ
+		// MPRå¾—åˆ°çŸ¢çŠ¶é¢
 		vtkSmartPointer<vtkImageReslice> resliceSagittalAtAxial = vtkSmartPointer<vtkImageReslice>::New();
 		resliceSagittalAtAxial->SetInputData(vtkImage);
 		resliceSagittalAtAxial->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double sagittalDirectionCosines[9] = { axis1_axial[0], axis1_axial[1], axis1_axial[2],
 											   axis2_axial[0], axis2_axial[1], axis2_axial[2],
 											   -axis3_axial[0], -axis3_axial[1], -axis3_axial[2] };
@@ -535,12 +576,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		resliceSagittalAtAxial->SetInterpolationModeToLinear();
 		resliceSagittalAtAxial->Update();
 
-		// MPRµÃµ½¹Ú×´Ãæ
+		// MPRå¾—åˆ°å† çŠ¶é¢
 		vtkSmartPointer<vtkImageReslice> resliceCoronalAtAxial = vtkSmartPointer<vtkImageReslice>::New();
 		resliceCoronalAtAxial->SetInputData(vtkImage);
 		resliceCoronalAtAxial->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double coronalDirectionCosines[9] = { axis3_axial[0], axis3_axial[1], axis3_axial[2],
 											  axis2_axial[0], axis2_axial[1], axis2_axial[2],
 											  axis1_axial[0], axis1_axial[1], axis1_axial[2] };
@@ -558,7 +599,7 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		localize_result.resliceSagittal = vtkImage_resliceSagittal;
 		localize_result.resliceCoronal = vtkImage_resliceCoronal;
 
-		// ±£´æÇĞÃæÍ¼Ïñ
+		// ä¿å­˜åˆ‡é¢å›¾åƒ
 		string Filename_resliceAxialAtAxial = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceAxialAtAxial.nii.gz";
 		string Filename_resliceSagittalAtAxial = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceSagittalAtAxial.nii.gz";
 		string Filename_resliceCoronalAtAxial = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceCoronalAtAxial.nii.gz";
@@ -567,7 +608,7 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		SaveAsNifti(vtkImage_resliceCoronal, Filename_resliceCoronalAtAxial);
 	}
 
-	// Èç¹ûÊÇ¶¨Î»Ê¸×´Ãæ£¬ÔòÒÔÊ¸×´ÃæÎª±ê×¼£¬ÆäËüÁ½¸öÃæÓëÖ®´¹Ö±
+	// å¦‚æœæ˜¯å®šä½çŸ¢çŠ¶é¢ï¼Œåˆ™ä»¥çŸ¢çŠ¶é¢ä¸ºæ ‡å‡†ï¼Œå…¶å®ƒä¸¤ä¸ªé¢ä¸ä¹‹å‚ç›´
 	else if (mode == 2)
 	{
 		array<float, 3> axis1_sagittal = v1_sagittal;
@@ -575,12 +616,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		array<float, 3> axis3_sagittal = normal_sagittal;
 		double origin[3] = { point5[0], point5[1], point5[2] };
 
-		// MPRµÃµ½ºá¶ÏÃæ
+		// MPRå¾—åˆ°æ¨ªæ–­é¢
 		vtkSmartPointer<vtkImageReslice> resliceAxialAtSagittal = vtkSmartPointer<vtkImageReslice>::New();
 		resliceAxialAtSagittal->SetInputData(vtkImage);
 		resliceAxialAtSagittal->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double axialDirectionCosines[9] = { axis3_sagittal[0], axis3_sagittal[1], axis3_sagittal[2],
 										    axis1_sagittal[0], axis1_sagittal[1], axis1_sagittal[2],
 										    axis2_sagittal[0], axis2_sagittal[1], axis2_sagittal[2] };
@@ -590,12 +631,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		resliceAxialAtSagittal->SetInterpolationModeToLinear();
 		resliceAxialAtSagittal->Update();
 
-		// MPRµÃµ½Ê¸×´Ãæ
+		// MPRå¾—åˆ°çŸ¢çŠ¶é¢
 		vtkSmartPointer<vtkImageReslice> resliceSagittalAtSagittal = vtkSmartPointer<vtkImageReslice>::New();
 		resliceSagittalAtSagittal->SetInputData(vtkImage);
 		resliceSagittalAtSagittal->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double sagittalDirectionCosines[9] = { axis1_sagittal[0], axis1_sagittal[1], axis1_sagittal[2],
 											   axis2_sagittal[0], axis2_sagittal[1], axis2_sagittal[2],
 											   -axis3_sagittal[0], -axis3_sagittal[1], -axis3_sagittal[2] };
@@ -605,12 +646,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		resliceSagittalAtSagittal->SetInterpolationModeToLinear();
 		resliceSagittalAtSagittal->Update();
 
-		// MPRµÃµ½¹Ú×´Ãæ
+		// MPRå¾—åˆ°å† çŠ¶é¢
 		vtkSmartPointer<vtkImageReslice> resliceCoronalAtSagittal = vtkSmartPointer<vtkImageReslice>::New();
 		resliceCoronalAtSagittal->SetInputData(vtkImage);
 		resliceCoronalAtSagittal->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double coronalDirectionCosines[9] = { axis3_sagittal[0], axis3_sagittal[1], axis3_sagittal[2],
 											  axis2_sagittal[0], axis2_sagittal[1], axis2_sagittal[2],
 											  axis1_sagittal[0], axis1_sagittal[1], axis1_sagittal[2] };
@@ -628,7 +669,7 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		localize_result.resliceSagittal = vtkImage_resliceSagittal;
 		localize_result.resliceCoronal = vtkImage_resliceCoronal;
 
-		// ±£´æÇĞÃæÍ¼Ïñ
+		// ä¿å­˜åˆ‡é¢å›¾åƒ
 		string Filename_resliceAxialAtSagittal = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceAxialAtSagittal.nii.gz";
 		string Filename_resliceSagittalAtSagittal = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceSagittalAtSagittal.nii.gz";
 		string Filename_resliceCoronalAtSagittal = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceCoronalAtSagittal.nii.gz";
@@ -637,7 +678,7 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		SaveAsNifti(vtkImage_resliceCoronal, Filename_resliceCoronalAtSagittal);
 	}
 
-	// Èç¹ûÊÇ¶¨¹Ú×´Ãæ£¬ÔòÒÔ¹Ú×´ÃæÎª±ê×¼£¬ÆäËüÁ½¸öÃæÓëÖ®´¹Ö±
+	// å¦‚æœæ˜¯å®šå† çŠ¶é¢ï¼Œåˆ™ä»¥å† çŠ¶é¢ä¸ºæ ‡å‡†ï¼Œå…¶å®ƒä¸¤ä¸ªé¢ä¸ä¹‹å‚ç›´
 	else if (mode == 3)
 	{
 		array<float, 3> axis1_coronal = cal_norm_vec(v2_coronal, v1_coronal);
@@ -645,12 +686,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		array<float, 3> axis3_coronal = v2_coronal;
 		double origin[3] = { point2[0], point2[1], point2[2] };
 
-		// MPRµÃµ½ºá¶ÏÃæ
+		// MPRå¾—åˆ°æ¨ªæ–­é¢
 		vtkSmartPointer<vtkImageReslice> resliceAxialAtCoronal = vtkSmartPointer<vtkImageReslice>::New();
 		resliceAxialAtCoronal->SetInputData(vtkImage);
 		resliceAxialAtCoronal->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double axialDirectionCosines[9] = { axis3_coronal[0], axis3_coronal[1], axis3_coronal[2],
 											-axis1_coronal[0], -axis1_coronal[1], -axis1_coronal[2],
 											axis2_coronal[0], axis2_coronal[1], axis2_coronal[2] };
@@ -660,12 +701,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		resliceAxialAtCoronal->SetInterpolationModeToLinear();
 		resliceAxialAtCoronal->Update();
 
-		// MPRµÃµ½Ê¸×´Ãæ
+		// MPRå¾—åˆ°çŸ¢çŠ¶é¢
 		vtkSmartPointer<vtkImageReslice> resliceSagittalAtCoronal = vtkSmartPointer<vtkImageReslice>::New();
 		resliceSagittalAtCoronal->SetInputData(vtkImage);
 		resliceSagittalAtCoronal->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double sagittalDirectionCosines[9] = { axis1_coronal[0], axis1_coronal[1], axis1_coronal[2],
 											   axis2_coronal[0], axis2_coronal[1], axis2_coronal[2],
 											   -axis3_coronal[0], -axis3_coronal[1], -axis3_coronal[2] };
@@ -675,12 +716,12 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		resliceSagittalAtCoronal->SetInterpolationModeToLinear();
 		resliceSagittalAtCoronal->Update();
 
-		// MPRµÃµ½¹Ú×´Ãæ
+		// MPRå¾—åˆ°å† çŠ¶é¢
 		vtkSmartPointer<vtkImageReslice> resliceCoronalAtCoronal = vtkSmartPointer<vtkImageReslice>::New();
 		resliceCoronalAtCoronal->SetInputData(vtkImage);
 		resliceCoronalAtCoronal->SetOutputDimensionality(2);
 
-		// ÉèÖÃÇĞÆ¬Æ½ÃæµÄ·½ÏòºÍÔ­µã
+		// è®¾ç½®åˆ‡ç‰‡å¹³é¢çš„æ–¹å‘å’ŒåŸç‚¹
 		double coronalDirectionCosines[9] = { axis3_coronal[0], axis3_coronal[1], axis3_coronal[2],
 											  axis2_coronal[0], axis2_coronal[1], axis2_coronal[2],
 											  axis1_coronal[0], axis1_coronal[1], axis1_coronal[2] };
@@ -698,7 +739,7 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 		localize_result.resliceSagittal = vtkImage_resliceSagittal;
 		localize_result.resliceCoronal = vtkImage_resliceCoronal;
 
-		// ±£´æÇĞÃæÍ¼Ïñ
+		// ä¿å­˜åˆ‡é¢å›¾åƒ
 		string Filename_resliceAxialAtCoronal = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceAxialAtCoronal.nii.gz";
 		string Filename_resliceSagittalAtCoronal = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceSagittalAtCoronal.nii.gz";
 		string Filename_resliceCoronalAtCoronal = "E:/ShenFile/Code/brain_oritation_detection/cpp/result/9103/resliceCoronalAtCoronal.nii.gz";
@@ -710,23 +751,56 @@ void mprProcess(ImageType3F::Pointer itk_image, vector<array<float, 3>> out_poin
 
 int main()
 {
-	string dcm_dir = "E:/ShenFile/Code/brain_oritation_detection/test_data/dcm/9103.nii.gz";
+	string dcm_dir = "E:/ShenFile/Code/brain_oritation_detection/test_data/dcm/9103";
 	string onnx_model_path = "E:/ShenFile/Code/brain_oritation_detection/Brain_KeyPoint_Detection/train/checkpoints/onnx_model/model.onnx";
 	string engine_model_path = "./model.engine";
 	mprOutStruct localize_result;
 	int mode = 3;
 	Logger logger;
 
-	ImageType3F::Pointer itk_image = dataLoad(dcm_dir);
+	auto startDataLoad = chrono::high_resolution_clock::now(); // å¼€å§‹è®¡æ—¶
+	ImageType3F::Pointer itk_image = dcmDataLoad(dcm_dir);
+	auto endDataLoad = chrono::high_resolution_clock::now(); // ç»“æŸè®¡æ—¶
+	chrono::duration<double> dataLoadTime = endDataLoad - startDataLoad; // è®¡ç®—è€—æ—¶
+	cout << "DataLoad Time: " << dataLoadTime.count() << " seconds" << endl;
+
+	auto startPreprocessing = chrono::high_resolution_clock::now(); // å¼€å§‹è®¡æ—¶
 	ImageType3F::Pointer imageData = dataPreprocess(itk_image);
+	auto endPreprocessing = chrono::high_resolution_clock::now(); // ç»“æŸè®¡æ—¶
+	chrono::duration<double> preProcessingTime = endPreprocessing - startPreprocessing; // è®¡ç®—è€—æ—¶
+	cout << "Preprocessing Time: " << preProcessingTime.count() << " seconds" << endl;
+
+	auto startBuildEngine = chrono::high_resolution_clock::now(); // å¼€å§‹è®¡æ—¶
 	ICudaEngine* engine = buildEngine(engine_model_path, onnx_model_path, logger);
+	auto endBuildEngine = chrono::high_resolution_clock::now(); // ç»“æŸè®¡æ—¶
+	chrono::duration<double> buildEngineTime = endBuildEngine - startBuildEngine; // è®¡ç®—è€—æ—¶
+	cout << "BuildEngine Time: " << buildEngineTime.count() << " seconds" << endl;
+
+	auto startEnginePredict = chrono::high_resolution_clock::now(); // å¼€å§‹è®¡æ—¶
 	float* output_buffer = enginePredict(engine, imageData);
-	vector<array<float, 3>> out_points = processOutputBuffer(output_buffer);
+	auto endEnginePredict = chrono::high_resolution_clock::now(); // ç»“æŸè®¡æ—¶
+	chrono::duration<double> enginePredictTime = endEnginePredict - startEnginePredict; // è®¡ç®—è€—æ—¶
+	cout << "EnginePredict Time: " << enginePredictTime.count() << " seconds" << endl;
+
+	auto startPostProcessing = chrono::high_resolution_clock::now(); // å¼€å§‹è®¡æ—¶
+	vector<array<int, 3>> out_points = processOutputBuffer(output_buffer);
+	auto endPostProcessing = chrono::high_resolution_clock::now(); // ç»“æŸè®¡æ—¶
+	chrono::duration<double> postProcessingTime = endPostProcessing - startPostProcessing; // è®¡ç®—è€—æ—¶
+	cout << "PostProcessing Time: " << postProcessingTime.count() << " seconds" << endl;
+
+	auto startMPR = chrono::high_resolution_clock::now(); // å¼€å§‹è®¡æ—¶
 	mprProcess(itk_image, out_points, mode, localize_result);
+	auto endMPR = chrono::high_resolution_clock::now(); // ç»“æŸè®¡æ—¶
+	chrono::duration<double> MPRTime = endMPR - startMPR; // è®¡ç®—è€—æ—¶
+	cout << "MPR Time: " << MPRTime.count() << " seconds" << endl;
+
+	chrono::duration<double> TotalTime = endMPR - startDataLoad; // è®¡ç®—è€—æ—¶
+	cout << "Total Time: " << TotalTime.count() << " seconds" << endl;
 
 	delete[] output_buffer;
 	engine->destroy();
 
 	return EXIT_SUCCESS;
 }
+
 
